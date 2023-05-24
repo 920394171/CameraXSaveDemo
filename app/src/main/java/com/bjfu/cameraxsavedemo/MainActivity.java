@@ -58,54 +58,19 @@ import java.util.Locale;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
+
 /*
-1. 需要在app下的build.gradle中加入依赖：
-    def camerax_version = "1.0.0-beta07"
-    // CameraX core library using camera2 implementation
-    implementation "androidx.camera:camera-camera2:$camerax_version"
-    // CameraX Lifecycle Library
-    implementation "androidx.camera:camera-lifecycle:$camerax_version"
-    // CameraX View class
-    implementation "androidx.camera:camera-view:1.0.0-alpha14"
-2. 需要在app下的build.gradle中的 android 块末尾，紧跟 buildTypes 的位置添加：
-    compileOptions {
-        sourceCompatibility JavaVersion.VERSION_1_8
-        targetCompatibility JavaVersion.VERSION_1_8
-    }
-3. AndroidManifest.xml中添加权限：
-    <uses-feature android:name="android.hardware.camera.any" />
-    <uses-permission android:name="android.permission.CAMERA" />
-
-4. 修改activity_main.xml文件:
-    主要添加一个button以及一个androidx.camera.view.PreviewView
-    PreviewView用于显示相机预览。layout_width和layout_height都设置为match_parent即可
-        <Button
-        android:id="@+id/camera_capture_button"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_marginBottom="50dp"
-        android:elevation="2dp"
-        android:scaleType="fitCenter"
-        android:text="Take Photo"
-        app:layout_constraintBottom_toBottomOf="parent"
-        app:layout_constraintLeft_toLeftOf="parent"
-        app:layout_constraintRight_toRightOf="parent" />
-
-<!--    PreviewView用以显示相机预览-->
-    <androidx.camera.view.PreviewView
-        android:id="@+id/viewFinder"
-        android:layout_width="match_parent"
-        android:layout_height="match_parent" />
+其他位置的修改
+1. utils中的四个文件为工具类，直接使用即可
+2. 需要在src/main下新建assets文件夹，并将训练好并导出为torchscript格式的模型文件和一个每行为一个类别名称的classes.txt文件放进去
+3. 需要修改xml文件，详见activity_main.xml
+4. 需要修改app下的build.gradle，加入torch依赖
+5. 注意android studio和sdk版本问题
  */
-
 
 public final class MainActivity extends AppCompatActivity {
     private long mLastAnalysisResultTime = 0;
-//    private androidx.camera.view.PreviewView viewFinder; // 自定义视图，显示相机预览用例
-//    private Button camera_capture_button; // 拍照按钮
     private ImageCapture imageCapture; // 拍照的用例
-    private File outputDirectory; // 输出路径
-    private ExecutorService cameraExecutor; // 提供了一种用于管理线程池的方法和机制，高效地处理多线程任务
     private static final String FILENAME_FORMAT = "yyyy-MM-dd-HH-mm-ss-SSS"; // 定义图片名称格式
     private static final int REQUEST_CODE_PERMISSIONS = 10; // 定义权限的请求码
     private static final String[] REQUIRED_PERMISSIONS = new String[]{"android.permission.CAMERA"}; // 请求列表，只有一个相机使用权限
@@ -121,34 +86,24 @@ public final class MainActivity extends AppCompatActivity {
     protected void onCreate(@Nullable Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
-//        camera_capture_button = findViewById(R.id.camera_capture_button);
-//        viewFinder = findViewById(R.id.object_detection_texture_view);
 
+        // 创建后台线程池
         mBackgroundExecutor = Executors.newSingleThreadExecutor();
 
-        // 判断权限是否开启
+        // 判断权限是否已经获得
         if (allPermissionsGranted()) {
+            // 如果权限已获得，则启动相机
             startCamera();
         } else {
+            // 如果权限未获得，则向用户请求所需权限
             ActivityCompat.requestPermissions(this, REQUIRED_PERMISSIONS, 10);
         }
 
-//        // 设置点击事件
-//        camera_capture_button.setOnClickListener(view -> {
-//            takePh2oto();
-//        });
-
-        // 得到输出目录
-        outputDirectory = getOutputDirectory();
-
-        // 得到线程池，用以相机的加载、拍摄等
-        cameraExecutor = Executors.newSingleThreadExecutor();
-
         try {
-            // 加载权重文件ptl
-//            mModule = LiteModuleLoader.load(assetFilePath(getApplicationContext(), "deeplabv3_scripted_optimized.ptl"));
+            // 加载模型权重文件ptl
             mModule = LiteModuleLoader.load(assetFilePath(getApplicationContext(), "epoch40facebest.torchscript.pt"));
 
+            // 读取类别文件classes.txt，并存储到类别列表中
             List<String> classes = new ArrayList<>();
             InputStream inputStream = getAssets().open("classes.txt");
             BufferedReader bufferedReader = new BufferedReader(new InputStreamReader(inputStream));
@@ -157,31 +112,49 @@ public final class MainActivity extends AppCompatActivity {
             while ((line = bufferedReader.readLine()) != null) {
                 classes.add(line);
             }
+
+            // 将类别列表转换为字符串数组
             PrePostProcessor.mClasses = new String[classes.size()];
             for (int i = 0; i < classes.size(); i++) {
                 PrePostProcessor.mClasses[i] = classes.get(i);
             }
-
         } catch (IOException e) {
             Log.e("ImageSegmentation", "Error reading assets", e);
         }
 
+        // 获取预处理和后处理器的实例
         prePostProcessor = PrePostProcessor.INSTANCE;
     }
 
+
+    /**
+     * 获取位于 Assets 目录下的文件的绝对路径，如果文件已存在于应用的内部存储中则直接返回该路径。
+     *
+     * @param context   上下文对象
+     * @param assetName 要获取的文件名
+     * @return 文件的绝对路径
+     * @throws IOException 读取或写入文件时可能抛出的异常
+     */
     public static String assetFilePath(Context context, String assetName) throws IOException {
+        // 创建一个File对象，表示存储在应用内部存储中的目标文件
         File file = new File(context.getFilesDir(), assetName);
+
+        // 如果文件已存在且大小大于0，则表示文件已经被复制到应用的内部存储中，直接返回该文件的绝对路径
         if (file.exists() && file.length() > 0) {
             return file.getAbsolutePath();
         }
+
+        // 如果文件不存在或大小为0，则从Assets中读取文件，并将其复制到应用的内部存储中
         try (InputStream is = context.getAssets().open(assetName);
              FileOutputStream os = new FileOutputStream(file)) {
             byte[] buffer = new byte[4 * 1024];
             int read;
+            // 循环读取输入流中的数据，并写入输出流，直到读取完整个文件
             while ((read = is.read(buffer)) != -1) {
                 os.write(buffer, 0, read);
             }
             os.flush();
+            // 返回复制后的文件的绝对路径
             return file.getAbsolutePath();
         }
     }
@@ -233,7 +206,7 @@ public final class MainActivity extends AppCompatActivity {
 
                         // cameraSelector用于设置前摄与后摄
 //                         CameraSelector cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA;
-                         CameraSelector cameraSelector = CameraSelector.DEFAULT_FRONT_CAMERA;
+                        CameraSelector cameraSelector = CameraSelector.DEFAULT_FRONT_CAMERA;
 
                         // 创建ImageAnalysis实例，用于分析图像
                         // 背压策略（Backpressure Strategy）是在处理数据流（例如图像或事件流）时，用于控制数据流速度和压力的一种策略。两种：
@@ -244,7 +217,7 @@ public final class MainActivity extends AppCompatActivity {
                                 .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST) // 设置背压策略
                                 .build();
 
-                        // 设置图像分析器
+                        // 设置图像分析器，需要用到一个线程池，并分析得到的image
                         imageAnalyzer.setAnalyzer(mBackgroundExecutor, image -> {
                             int rotationDegrees = image.getImageInfo().getRotationDegrees(); // 获取图像的旋转角度
                             if (SystemClock.elapsedRealtime() - mLastAnalysisResultTime >= 300) { // 检查是否满足分析时间间隔要求
@@ -263,8 +236,6 @@ public final class MainActivity extends AppCompatActivity {
                             image.close(); // 关闭图像，释放资源
                         });
 
-
-
                         // 在使用CameraX库进行相机开发时，应用程序通常会将不同的相机用例（如预览、拍照等）绑定到相机对象上，以便实现相应的功能
                         // 当不再需要使用相机或相机用例时，应用程序需要将它们与相机解除绑定关系，释放资源
                         cameraProvider.unbindAll();
@@ -279,11 +250,22 @@ public final class MainActivity extends AppCompatActivity {
         );
     }
 
+    /**
+     * 对分析结果进行UI显示
+     *
+     * @param result
+     */
     private void applyToUiAnalyzeImageResult(AnalysisResult result) {
         mResultView.setResults(result.getResults());
+        // 用于标记一个视图（View）无效，并请求重新绘制
         mResultView.invalidate();
     }
 
+    /**
+     * 获取预览的TextureView
+     *
+     * @return
+     */
     private PreviewView getCameraPreviewTextureView() {
         mResultView = findViewById(R.id.resultView);
         if (!firstIn) {
@@ -295,10 +277,18 @@ public final class MainActivity extends AppCompatActivity {
         }
     }
 
+    /**
+     * 对图像进行分析和检测
+     *
+     * @param image
+     * @param rotationDegrees 旋转的角度
+     * @param changeToBack    是否将图像切换到前面
+     * @return
+     */
     private AnalysisResult analyzeImage(ImageProxy image, int rotationDegrees, boolean changeToBack) {
         try {
             if (mModule == null) {
-//                mModule = LiteModuleLoader.load(assetFilePath(getApplicationContext(), "yolov5s.torchscript.ptl"));
+                // 初始化模型
                 mModule = LiteModuleLoader.load(assetFilePath(getApplicationContext(), "epoch40facebest.torchscript.pt"));
             }
         } catch (IOException e) {
@@ -308,90 +298,44 @@ public final class MainActivity extends AppCompatActivity {
 
         @SuppressLint("UnsafeOptInUsageError") Bitmap bitmap = imgToBitmap(image.getImage());
 
+        // 需要将图片统一顺时针旋转rotationDegrees，让图片恢复成竖直
         Matrix matrix = new Matrix();
         matrix.postRotate(rotationDegrees);
         bitmap = Bitmap.createBitmap(bitmap, 0, 0, bitmap.getWidth(), bitmap.getHeight(), matrix, true);
 
-        if(!changeToBack) {
+        // 如果是前摄，则需要镜像翻转
+        if (!changeToBack) {
             Matrix matrixMirror = new Matrix();
             matrixMirror.preScale(-1f, 1f);
             matrixMirror.postTranslate(bitmap.getWidth(), 0f);
             bitmap = Bitmap.createBitmap(bitmap, 0, 0, bitmap.getWidth(), bitmap.getHeight(), matrixMirror, true);
         }
 
+        // 将bitmap变成规定的输入尺寸
         Bitmap resizedBitmap = Bitmap.createScaledBitmap(bitmap, prePostProcessor.getMInputWidth(), prePostProcessor.getMInputWidth(), true);
+        // bitmap转换为tensor格式
         Tensor inputTensor = TensorImageUtils.bitmapToFloat32Tensor(resizedBitmap, prePostProcessor.getNO_MEAN_RGB(), prePostProcessor.getNO_STD_RGB());
+        // 推理并得到结果
         IValue[] outputTuple = mModule.forward(IValue.from(inputTensor)).toTuple();
         Tensor outputTensor = outputTuple[0].toTensor();
         float[] outputs = outputTensor.getDataAsFloatArray();
+        // 得到bitmap和模型要求的输入的长宽对应的比例、bitmap和模型输出的长款对应比例，用来恢复output中box的位置
         float imgScaleX = bitmap.getWidth() / (float) prePostProcessor.getMInputWidth();
         float imgScaleY = bitmap.getHeight() / (float) prePostProcessor.getMInputHeight();
         float ivScaleX = mResultView.getWidth() / (float) bitmap.getWidth();
         float ivScaleY = mResultView.getHeight() / (float) bitmap.getHeight();
+        // 将模型的输出outputs转换成结果列表，每个结果包括矩形的位置，得分和类别
         ArrayList<Result> results = prePostProcessor.outputsToNMSPredictions(outputs, imgScaleX, imgScaleY, ivScaleX, ivScaleY, 0f, 0f);
         return new AnalysisResult(results);
     }
 
 
     /**
-     * 当相机完成拍摄后的回调方法
+     * 将图片转化为bitmap，工具方法
+     *
+     * @param image
+     * @return Bitmap
      */
-    private void takePhoto() {
-        if (imageCapture == null)
-            return;
-
-        // 创建一个文件对象，使用当前时间作为文件名
-        File photoFile = new File(outputDirectory, new SimpleDateFormat(FILENAME_FORMAT, Locale.US).format(System.currentTimeMillis()) + ".jpg");
-
-        // 通过outputOptions，应用程序可以指定保存文件路径，元数据信息，旋转角度等输出文件过程中的操作，如：
-        // ImageCapture.Metadata metadata = new ImageCapture.Metadata();
-        // metadata.setLocation(location);
-        // ImageCapture.OutputFileOptions outputOptions = new ImageCapture.OutputFileOptions.Builder(photoFile)
-        //        .setMetadata(metadata)
-        //        .setCompressFormat(Bitmap.CompressFormat.JPEG)
-        //        .setRotation(90)
-        //        .setTargetAspectRatio(new Rational(16, 9))
-        //        .setTargetRotation(Surface.ROTATION_90)
-        //        .build();
-        ImageCapture.OutputFileOptions outputOptions = new ImageCapture.OutputFileOptions.Builder(photoFile).build();
-
-        // 重写回调函数
-        imageCapture.takePicture(
-//                outputOptions, ContextCompat.getMainExecutor(this), new ImageCapture.OnImageSavedCallback() {
-//                    @Override
-//                    public void onError(@NonNull ImageCaptureException exc) {
-//                        Log.e("CameraX", "拍摄失败：" + exc.getMessage(), exc);
-//                    }
-//
-//                    @Override
-//                    public void onImageSaved(@NonNull ImageCapture.OutputFileResults output) {
-//                        Uri savedUri = Uri.fromFile(photoFile);
-//                        String msg = "拍摄完成：" + savedUri;
-//                        Toast.makeText(MainActivity.this.getBaseContext(), msg, Toast.LENGTH_LONG).show();
-//                        Log.d("CameraX", msg);
-//
-//                        // 使用MediaScanner通知系统图库更新
-//                        // scanFile方法将图片文件的路径作为参数传递给它，系统会检测这个路径下的所有文件，并将它们添加到系统相册数据库中
-//                        MediaScannerConnection.scanFile(getBaseContext(), new String[]{photoFile.getPath()}, null, null);
-//                    }
-//                });
-                ContextCompat.getMainExecutor(this), new ImageCapture.OnImageCapturedCallback() {
-                    @Override
-                    public void onCaptureSuccess(@NonNull ImageProxy image) {
-                        @SuppressLint("UnsafeOptInUsageError") Bitmap bitmap = imgToBitmap(image.getImage());
-                        // 无论前后摄像头，统一旋转rotate
-                        Matrix matrix = new Matrix();
-                        matrix.postRotate(image.getImageInfo().getRotationDegrees());
-                        mBitmap = Bitmap.createBitmap(bitmap, 0, 0, bitmap.getWidth(), bitmap.getHeight(), matrix, true);
-                    }
-
-                    @Override
-                    public void onError(@NonNull ImageCaptureException exception) {
-                        super.onError(exception);
-                    }
-                });
-    }
-
     private Bitmap imgToBitmap(Image image) {
         Image.Plane[] planes = image.getPlanes();
         ByteBuffer yBuffer = planes[0].getBuffer();
@@ -424,33 +368,21 @@ public final class MainActivity extends AppCompatActivity {
         return allGranted;
     }
 
-    /**
-     * 得到图片输出的目录，如果sdcard/Android/media/包名 存在则返回sdcard/Android/media/包名/CameraXSaveDemo/，否则返回data/data/包名/files/
-     */
-    private File getOutputDirectory() {
-        // getExternalMediaDirs返回一个数组，其中包含多个存储设备的路径，每个路径都是File对象
-        // 数组中的第一个路径表示应用程序的主要存储设备，而其他路径表示应用程序可以访问的其他存储设备
-        File[] exMedias = getExternalMediaDirs();
-        try {
-            File mediaDir = new File(exMedias[0], getResources().getString(R.string.app_name));
-            mediaDir.mkdirs();
-            if (mediaDir.exists())
-                return mediaDir;
-        } catch (Exception e) {
-            e.printStackTrace();
-        }
-        return getFilesDir();
-    }
 
     /**
-     * cameraExecutor是一个线程池，当不再需要使用相机捕获图片时，应该及时关闭cameraExecutor线程池，以释放资源并避免内存泄漏
+     * mBackgroundExecutor是一个线程池，当不再需要使用相机捕获图片时，应该及时关闭mBackgroundExecutor线程池，以释放资源并避免内存泄漏
      */
     @Override
     protected void onDestroy() {
         super.onDestroy();
-        cameraExecutor.shutdown();
+        mBackgroundExecutor.shutdown();
     }
 
+    /**
+     * @param requestCode  请求码
+     * @param permissions
+     * @param grantResults
+     */
     @Override
     public void onRequestPermissionsResult(int requestCode, @NonNull String[] permissions, @NonNull int[] grantResults) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
@@ -464,6 +396,9 @@ public final class MainActivity extends AppCompatActivity {
         }
     }
 
+    /**
+     * 保存图片所有分析结果的类
+     */
     public static class AnalysisResult {
         private ArrayList<Result> mResults;
 
